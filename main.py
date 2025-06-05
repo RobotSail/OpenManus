@@ -1,6 +1,7 @@
 import asyncio
 
 from app.agent.manus import Manus
+from app.agent_thought_logger import cleanup_thought_loggers
 from app.logger import logger
 
 
@@ -21,6 +22,8 @@ async def main():
     finally:
         # Ensure agent resources are cleaned up before exiting
         await agent.cleanup()
+        # Clean up thought loggers
+        cleanup_thought_loggers()
 
 
 if __name__ == "__main__":

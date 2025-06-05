@@ -4,6 +4,7 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.agent_thought_logger import ThoughtType, get_thought_logger
 from app.llm import LLM
 from app.logger import logger
 from app.sandbox.client import SANDBOX_CLIENT
@@ -42,6 +43,9 @@ class BaseAgent(BaseModel, ABC):
 
     duplicate_threshold: int = 2
 
+    # Thought logging
+    _thought_logger = None
+
     class Config:
         arbitrary_types_allowed = True
         extra = "allow"  # Allow extra fields for flexibility in subclasses
@@ -53,6 +57,8 @@ class BaseAgent(BaseModel, ABC):
             self.llm = LLM(config_name=self.name.lower())
         if not isinstance(self.memory, Memory):
             self.memory = Memory()
+        # Initialize thought logger
+        self._thought_logger = get_thought_logger(self.name)
         return self
 
     @asynccontextmanager
@@ -130,6 +136,9 @@ class BaseAgent(BaseModel, ABC):
 
         if request:
             self.update_memory("user", request)
+            # Log the initial user request
+            if self._thought_logger:
+                self._thought_logger.log_observation(f"User request received: {request}")
 
         results: List[str] = []
         async with self.state_context(AgentState.RUNNING):
@@ -138,6 +147,11 @@ class BaseAgent(BaseModel, ABC):
             ):
                 self.current_step += 1
                 logger.info(f"Executing step {self.current_step}/{self.max_steps}")
+
+                # Log start of step
+                if self._thought_logger:
+                    self._thought_logger.log_planning(f"Starting execution step {self.current_step}/{self.max_steps}")
+
                 step_result = await self.step()
 
                 # Check for stuck state
@@ -147,9 +161,17 @@ class BaseAgent(BaseModel, ABC):
                 results.append(f"Step {self.current_step}: {step_result}")
 
             if self.current_step >= self.max_steps:
+                if self._thought_logger:
+                    self._thought_logger.log_reflection(f"Reached maximum steps ({self.max_steps}). Task may be incomplete.")
                 self.current_step = 0
                 self.state = AgentState.IDLE
                 results.append(f"Terminated: Reached max steps ({self.max_steps})")
+
+        # Log completion
+        if self._thought_logger:
+            summary = self._thought_logger.get_thoughts_summary()
+            logger.info(f"Agent thoughts summary: {summary}")
+
         await SANDBOX_CLIENT.cleanup()
         return "\n".join(results) if results else "No steps executed"
 
@@ -166,6 +188,13 @@ class BaseAgent(BaseModel, ABC):
         Observed duplicate responses. Consider new strategies and avoid repeating ineffective paths already attempted."
         self.next_step_prompt = f"{stuck_prompt}\n{self.next_step_prompt}"
         logger.warning(f"Agent detected stuck state. Added prompt: {stuck_prompt}")
+
+        # Log the stuck state thinking
+        if self._thought_logger:
+            self._thought_logger.log_reflection(
+                "Detected repetitive behavior pattern. Need to try a different approach to avoid getting stuck.",
+                context={"stuck_prompt_added": stuck_prompt}
+            )
 
     def is_stuck(self) -> bool:
         """Check if the agent is stuck in a loop by detecting duplicate content"""

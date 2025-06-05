@@ -4,6 +4,7 @@ import asyncio
 import sys
 
 from app.agent.mcp import MCPAgent
+from app.agent_thought_logger import cleanup_thought_loggers
 from app.config import config
 from app.logger import logger
 
@@ -63,6 +64,7 @@ class MCPRunner:
     async def cleanup(self) -> None:
         """Clean up agent resources."""
         await self.agent.cleanup()
+        cleanup_thought_loggers()
         logger.info("Session ended")
 
 

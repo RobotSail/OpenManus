@@ -5,12 +5,12 @@ from typing import Any, List, Optional, Union
 from pydantic import Field
 
 from app.agent.react import ReActAgent
+from app.agent_thought_logger import ThoughtType
 from app.exceptions import TokenLimitExceeded
 from app.logger import logger
 from app.prompt.toolcall import NEXT_STEP_PROMPT, SYSTEM_PROMPT
 from app.schema import TOOL_CHOICE_TYPE, AgentState, Message, ToolCall, ToolChoice
 from app.tool import CreateChatCompletion, Terminate, ToolCollection
-
 
 TOOL_CALL_REQUIRED = "Tool calls required but none provided"
 
@@ -63,6 +63,11 @@ class ToolCallAgent(ReActAgent):
                 logger.error(
                     f"🚨 Token limit error (from RetryError): {token_limit_error}"
                 )
+                # Log the error thinking
+                if self._thought_logger:
+                    self._thought_logger.log_error_thinking(
+                        f"Hit token limit: {str(token_limit_error)}. Cannot continue execution."
+                    )
                 self.memory.add_message(
                     Message.assistant_message(
                         f"Maximum token limit reached, cannot continue execution: {str(token_limit_error)}"
@@ -77,7 +82,32 @@ class ToolCallAgent(ReActAgent):
         )
         content = response.content if response and response.content else ""
 
-        # Log response info
+        # Log the agent's reasoning/thoughts
+        if self._thought_logger and content:
+            # Determine the type of thinking based on content and context
+            thought_type = ThoughtType.REASONING
+            if "plan" in content.lower() or "strategy" in content.lower() or "approach" in content.lower():
+                thought_type = ThoughtType.PLANNING
+            elif "decide" in content.lower() or "choose" in content.lower() or "select" in content.lower():
+                thought_type = ThoughtType.DECISION
+            elif "observe" in content.lower() or "see" in content.lower() or "notice" in content.lower():
+                thought_type = ThoughtType.OBSERVATION
+
+            # Extract tool names for context
+            tool_names = [call.function.name for call in tool_calls] if tool_calls else None
+
+            self._thought_logger.log_thought(
+                content,
+                thought_type=thought_type,
+                tool_calls=tool_names,
+                context={
+                    "tool_choice_mode": self.tool_choices.value if hasattr(self.tool_choices, 'value') else str(self.tool_choices),
+                    "available_tools": len(self.available_tools.tools) if self.available_tools else 0,
+                    "response_has_tool_calls": bool(tool_calls)
+                }
+            )
+
+        # Log response info (keeping original logging for compatibility)
         logger.info(f"✨ {self.name}'s thoughts: {content}")
         logger.info(
             f"🛠️ {self.name} selected {len(tool_calls) if tool_calls else 0} tools to use"
@@ -88,6 +118,16 @@ class ToolCallAgent(ReActAgent):
             )
             logger.info(f"🔧 Tool arguments: {tool_calls[0].function.arguments}")
 
+            # Log decision-making about tool selection
+            if self._thought_logger:
+                self._thought_logger.log_decision(
+                    f"Decided to use {len(tool_calls)} tool(s): {', '.join([call.function.name for call in tool_calls])}",
+                    tool_calls=[call.function.name for call in tool_calls],
+                    context={
+                        "tool_arguments": {call.function.name: call.function.arguments for call in tool_calls}
+                    }
+                )
+
         try:
             if response is None:
                 raise RuntimeError("No response received from the LLM")
@@ -95,9 +135,10 @@ class ToolCallAgent(ReActAgent):
             # Handle different tool_choices modes
             if self.tool_choices == ToolChoice.NONE:
                 if tool_calls:
-                    logger.warning(
-                        f"🤔 Hmm, {self.name} tried to use tools when they weren't available!"
-                    )
+                    warning_msg = f"Attempted to use tools when they weren't available!"
+                    logger.warning(f"🤔 Hmm, {self.name} {warning_msg}")
+                    if self._thought_logger:
+                        self._thought_logger.log_error_thinking(warning_msg)
                 if content:
                     self.memory.add_message(Message.assistant_message(content))
                     return True
@@ -112,15 +153,22 @@ class ToolCallAgent(ReActAgent):
             self.memory.add_message(assistant_msg)
 
             if self.tool_choices == ToolChoice.REQUIRED and not self.tool_calls:
+                if self._thought_logger:
+                    self._thought_logger.log_reflection("Tool calls were required but none were provided. Will need to try again.")
                 return True  # Will be handled in act()
 
             # For 'auto' mode, continue with content if no commands but content exists
             if self.tool_choices == ToolChoice.AUTO and not self.tool_calls:
+                if self._thought_logger and content:
+                    self._thought_logger.log_reflection("No tools selected, but provided reasoning. Continuing with text response.")
                 return bool(content)
 
             return bool(self.tool_calls)
         except Exception as e:
-            logger.error(f"🚨 Oops! The {self.name}'s thinking process hit a snag: {e}")
+            error_msg = f"The thinking process encountered an error: {str(e)}"
+            logger.error(f"🚨 Oops! {error_msg}")
+            if self._thought_logger:
+                self._thought_logger.log_error_thinking(error_msg)
             self.memory.add_message(
                 Message.assistant_message(
                     f"Error encountered while processing: {str(e)}"
@@ -137,10 +185,23 @@ class ToolCallAgent(ReActAgent):
             # Return last message content if no tool calls
             return self.messages[-1].content or "No content or commands to execute"
 
+        # Log the start of tool execution
+        if self._thought_logger:
+            tool_names = [call.function.name for call in self.tool_calls]
+            self._thought_logger.log_planning(
+                f"About to execute {len(self.tool_calls)} tool(s): {', '.join(tool_names)}"
+            )
+
         results = []
-        for command in self.tool_calls:
+        for i, command in enumerate(self.tool_calls):
             # Reset base64_image for each tool call
             self._current_base64_image = None
+
+            # Log before executing each tool
+            if self._thought_logger:
+                self._thought_logger.log_observation(
+                    f"Executing tool {i+1}/{len(self.tool_calls)}: {command.function.name}"
+                )
 
             result = await self.execute_tool(command)
 
@@ -150,6 +211,24 @@ class ToolCallAgent(ReActAgent):
             logger.info(
                 f"🎯 Tool '{command.function.name}' completed its mission! Result: {result}"
             )
+
+            # Log the tool result and any observations
+            if self._thought_logger:
+                # Determine if result indicates success or failure
+                is_error = result.lower().startswith("error:") if isinstance(result, str) else False
+
+                if is_error:
+                    self._thought_logger.log_observation(
+                        f"Tool '{command.function.name}' encountered an error: {result}",
+                        context={"tool_name": command.function.name, "result_type": "error"}
+                    )
+                else:
+                    # Truncate very long results for readability in thoughts
+                    result_summary = result if len(str(result)) <= 200 else f"{str(result)[:200]}... [truncated]"
+                    self._thought_logger.log_observation(
+                        f"Tool '{command.function.name}' executed successfully. Result: {result_summary}",
+                        context={"tool_name": command.function.name, "result_type": "success", "full_result_length": len(str(result))}
+                    )
 
             # Add tool response to memory
             tool_msg = Message.tool_message(
@@ -161,20 +240,40 @@ class ToolCallAgent(ReActAgent):
             self.memory.add_message(tool_msg)
             results.append(result)
 
+        # Log completion of all tool executions
+        if self._thought_logger:
+            self._thought_logger.log_reflection(
+                f"Completed execution of all {len(self.tool_calls)} tool(s). Ready to analyze results and plan next steps.",
+                context={"tools_executed": [call.function.name for call in self.tool_calls]}
+            )
+
         return "\n\n".join(results)
 
     async def execute_tool(self, command: ToolCall) -> str:
         """Execute a single tool call with robust error handling"""
         if not command or not command.function or not command.function.name:
-            return "Error: Invalid command format"
+            error_msg = "Invalid command format"
+            if self._thought_logger:
+                self._thought_logger.log_error_thinking(f"Tool execution failed: {error_msg}")
+            return f"Error: {error_msg}"
 
         name = command.function.name
         if name not in self.available_tools.tool_map:
-            return f"Error: Unknown tool '{name}'"
+            error_msg = f"Unknown tool '{name}'"
+            if self._thought_logger:
+                self._thought_logger.log_error_thinking(f"Tool execution failed: {error_msg}")
+            return f"Error: {error_msg}"
 
         try:
             # Parse arguments
             args = json.loads(command.function.arguments or "{}")
+
+            # Log the tool execution start
+            if self._thought_logger:
+                self._thought_logger.log_planning(
+                    f"Executing tool '{name}' with arguments: {args}",
+                    context={"tool_name": name, "arguments": args}
+                )
 
             # Execute the tool
             logger.info(f"🔧 Activating tool: '{name}'...")
@@ -201,10 +300,20 @@ class ToolCallAgent(ReActAgent):
             logger.error(
                 f"📝 Oops! The arguments for '{name}' don't make sense - invalid JSON, arguments:{command.function.arguments}"
             )
+            if self._thought_logger:
+                self._thought_logger.log_error_thinking(
+                    f"Failed to parse JSON arguments for tool '{name}': {command.function.arguments}",
+                    context={"tool_name": name, "raw_arguments": command.function.arguments}
+                )
             return f"Error: {error_msg}"
         except Exception as e:
             error_msg = f"⚠️ Tool '{name}' encountered a problem: {str(e)}"
             logger.exception(error_msg)
+            if self._thought_logger:
+                self._thought_logger.log_error_thinking(
+                    f"Tool '{name}' execution failed with exception: {str(e)}",
+                    context={"tool_name": name, "exception_type": type(e).__name__}
+                )
             return f"Error: {error_msg}"
 
     async def _handle_special_tool(self, name: str, result: Any, **kwargs):

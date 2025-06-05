@@ -22,12 +22,12 @@ Example:
 {{"current_state": {{"evaluation_previous_goal": "Success|Failed|Unknown - Analyze the current elements and the image to check if the previous goals/actions are successful like intended by the task. Mention if something unexpected happened. Shortly state why/why not",
 "memory": "Description of what has been done and what you need to remember. Be very specific. Count here ALWAYS how many times you have done something and how many remain. E.g. 0 out of 10 websites analyzed. Continue with abc and xyz",
 "next_goal": "What needs to be done with the next immediate action"}},
-"action":[{{"one_action_name": {{// action-specific parameter}}}}, // ... more actions in sequence]}}
+"action":[{{"browser_use": {{// browser action parameters}}}}, // ... more actions in sequence]}}
 
-2. ACTIONS: You can specify multiple actions in the list to be executed in sequence. But always specify only one action name per item. Use maximum {{max_actions}} actions per sequence.
+2. ACTIONS: You can specify multiple browser_use actions in the list to be executed in sequence. But always specify only one browser_use action per item. Use maximum {{max_actions}} actions per sequence.
 Common action sequences:
-- Form filling: [{{"input_text": {{"index": 1, "text": "username"}}}}, {{"input_text": {{"index": 2, "text": "password"}}}}, {{"click_element": {{"index": 3}}}}]
-- Navigation and extraction: [{{"go_to_url": {{"url": "https://example.com"}}}}, {{"extract_content": {{"goal": "extract the names"}}}}]
+- Form filling: [{{"browser_use": {{"action": "input_text", "index": 1, "text": "username"}}}}, {{"browser_use": {{"action": "input_text", "index": 2, "text": "password"}}}}, {{"browser_use": {{"action": "click_element", "index": 3}}}}]
+- Navigation and extraction: [{{"browser_use": {{"action": "go_to_url", "url": "https://example.com"}}}}, {{"browser_use": {{"action": "extract_content", "goal": "extract the names"}}}}]
 - Actions are executed in the given order
 - If the page changes after an action, the sequence is interrupted and you get the new state.
 - Only provide the action sequence until an action which changes the page state significantly.
@@ -37,6 +37,7 @@ Common action sequences:
 3. ELEMENT INTERACTION:
 - Only use indexes of the interactive elements
 - Elements marked with "[]Non-interactive text" are non-interactive
+- Always use the browser_use tool with the appropriate action parameter
 
 4. NAVIGATION & ERROR HANDLING:
 - If no suitable elements exist, use other functions to complete the task

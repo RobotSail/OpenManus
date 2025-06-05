@@ -1,4 +1,7 @@
+import asyncio
 import math
+import time
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Union
 
 import tiktoken
@@ -12,6 +15,7 @@ from openai import (
 )
 from openai.types.chat import ChatCompletion, ChatCompletionMessage
 from tenacity import (
+    before_sleep_log,
     retry,
     retry_if_exception_type,
     stop_after_attempt,
@@ -30,8 +34,7 @@ from app.schema import (
     ToolChoice,
 )
 
-
-REASONING_MODELS = ["o1", "o3-mini"]
+REASONING_MODELS = ["o1", "o3-mini", "Qwen/Qwen3-235B-A22B"]
 MULTIMODAL_MODELS = [
     "gpt-4-vision-preview",
     "gpt-4o",
@@ -39,6 +42,9 @@ MULTIMODAL_MODELS = [
     "claude-3-opus-20240229",
     "claude-3-sonnet-20240229",
     "claude-3-haiku-20240307",
+    "claude-3-7-sonnet-20250219",
+    "claude-3-5-sonnet-20241022",
+    "OpenGVLab/InternVL3-78B",
 ]
 
 
@@ -171,6 +177,45 @@ class TokenCounter:
         return total_tokens
 
 
+class TokenBucketRateLimiter:
+    """Token bucket rate limiter for managing API rate limits."""
+
+    def __init__(self, tokens_per_minute: int = 999_999_999_999):
+        self.tokens_per_minute = tokens_per_minute
+        self.tokens = tokens_per_minute  # Start with a full bucket
+        self.last_update = datetime.now()
+        self.lock = False
+
+    def update_tokens(self):
+        """Update available tokens based on time elapsed."""
+        now = datetime.now()
+        time_passed = (now - self.last_update).total_seconds()
+        self.tokens = min(
+            self.tokens_per_minute,
+            self.tokens + (time_passed * self.tokens_per_minute / 60.0)
+        )
+        self.last_update = now
+
+    async def acquire(self, tokens: int) -> bool:
+        """Try to acquire tokens. Returns True if successful, False if need to wait."""
+        while self.lock:
+            await asyncio.sleep(0.1)  # Wait if another request is checking
+
+        self.lock = True
+        try:
+            self.update_tokens()
+            if self.tokens >= tokens:
+                self.tokens -= tokens
+                return True
+            else:
+                # Calculate wait time in seconds
+                wait_time = ((tokens - self.tokens) * 60.0 / self.tokens_per_minute)
+                logger.info(f"Rate limit would be exceeded. Waiting {wait_time:.2f} seconds...")
+                return False
+        finally:
+            self.lock = False
+
+
 class LLM:
     _instances: Dict[str, "LLM"] = {}
 
@@ -225,6 +270,9 @@ class LLM:
                 self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
 
             self.token_counter = TokenCounter(self.tokenizer)
+
+            # Initialize rate limiter
+            self.rate_limiter = TokenBucketRateLimiter()
 
     def count_tokens(self, text: str) -> int:
         """Calculate the number of tokens in a text"""
@@ -351,12 +399,17 @@ class LLM:
 
         return formatted_messages
 
+
+    async def _handle_rate_limit(self, tokens: int) -> None:
+        """Handle rate limiting by waiting if necessary."""
+        while not await self.rate_limiter.acquire(tokens):
+            await asyncio.sleep(1)  # Wait 1 second before checking again
+
     @retry(
         wait=wait_random_exponential(min=1, max=60),
         stop=stop_after_attempt(6),
-        retry=retry_if_exception_type(
-            (OpenAIError, Exception, ValueError)
-        ),  # Don't retry TokenLimitExceeded
+        retry=retry_if_exception_type((APIError, Exception, ValueError)),
+        before_sleep=before_sleep_log(logger, log_level=20)  # INFO level
     )
     async def ask(
         self,
@@ -402,6 +455,9 @@ class LLM:
                 error_message = self.get_limit_error_message(input_tokens)
                 # Raise a special exception that won't be retried
                 raise TokenLimitExceeded(error_message)
+
+            # Wait for rate limit if necessary
+            await self._handle_rate_limit(input_tokens)
 
             params = {
                 "model": self.model,
@@ -481,9 +537,8 @@ class LLM:
     @retry(
         wait=wait_random_exponential(min=1, max=60),
         stop=stop_after_attempt(6),
-        retry=retry_if_exception_type(
-            (OpenAIError, Exception, ValueError)
-        ),  # Don't retry TokenLimitExceeded
+        retry=retry_if_exception_type((APIError, Exception, ValueError)),
+        before_sleep=before_sleep_log(logger, log_level=20)  # INFO level
     )
     async def ask_with_images(
         self,
@@ -572,6 +627,9 @@ class LLM:
             if not self.check_token_limit(input_tokens):
                 raise TokenLimitExceeded(self.get_limit_error_message(input_tokens))
 
+            # Wait for rate limit if necessary
+            await self._handle_rate_limit(input_tokens)
+
             # Set up API parameters
             params = {
                 "model": self.model,
@@ -637,9 +695,8 @@ class LLM:
     @retry(
         wait=wait_random_exponential(min=1, max=60),
         stop=stop_after_attempt(6),
-        retry=retry_if_exception_type(
-            (OpenAIError, Exception, ValueError)
-        ),  # Don't retry TokenLimitExceeded
+        retry=retry_if_exception_type((APIError, Exception, ValueError)),
+        before_sleep=before_sleep_log(logger, log_level=20)  # INFO level
     )
     async def ask_tool(
         self,
@@ -710,6 +767,9 @@ class LLM:
                     if not isinstance(tool, dict) or "type" not in tool:
                         raise ValueError("Each tool must be a dict with 'type' field")
 
+            # Wait for rate limit if necessary
+            await self._handle_rate_limit(input_tokens + tools_tokens)
+
             # Set up the completion request
             params = {
                 "model": self.model,
@@ -733,6 +793,47 @@ class LLM:
                 **params
             )
 
+            # Log the raw LLM response for debugging
+            if response.choices and response.choices[0].message:
+                raw_message = response.choices[0].message
+                logger.info(f"🧠 RAW LLM RESPONSE:")
+                logger.info(f"   Content: {repr(raw_message.content)}")
+                logger.info(f"   Tool Calls: {raw_message.tool_calls}")
+                logger.info(f"   Role: {raw_message.role}")
+
+                # Also log to thought logger if available
+                try:
+                    from app.agent_thought_logger import get_thought_logger
+                    # Try to get the agent name from the conversation context
+                    agent_name = "unknown"
+                    if messages and len(messages) > 0:
+                        # Look for agent name in recent messages or use a default
+                        agent_name = "llm_raw"
+
+                    thought_logger = get_thought_logger(agent_name)
+
+                    # Log the raw content if it exists
+                    if raw_message.content:
+                        thought_logger.log_reasoning(
+                            f"RAW LLM RESPONSE: {raw_message.content}",
+                            context={
+                                "raw_response": True,
+                                "has_tool_calls": bool(raw_message.tool_calls),
+                                "role": raw_message.role
+                            }
+                        )
+                    else:
+                        thought_logger.log_observation(
+                            f"LLM returned tool calls only (no content text)",
+                            context={
+                                "raw_response": True,
+                                "tool_calls_count": len(raw_message.tool_calls) if raw_message.tool_calls else 0,
+                                "role": raw_message.role
+                            }
+                        )
+                except Exception as e:
+                    logger.debug(f"Failed to log to thought logger: {e}")
+
             # Check if response is valid
             if not response.choices or not response.choices[0].message:
                 print(response)
@@ -753,6 +854,8 @@ class LLM:
             logger.error(f"Validation error in ask_tool: {ve}")
             raise
         except OpenAIError as oe:
+            import json
+            turns = [m["role"] for m in params["messages"]]
             logger.error(f"OpenAI API error: {oe}")
             if isinstance(oe, AuthenticationError):
                 logger.error("Authentication failed. Check API key.")
@@ -760,6 +863,36 @@ class LLM:
                 logger.error("Rate limit exceeded. Consider increasing retry attempts.")
             elif isinstance(oe, APIError):
                 logger.error(f"API error: {oe}")
+            logger.error(f"Turns taken were: {turns}")
+
+            msgs_to_log = []
+            for msg in params["messages"]:
+                new_msg = msg
+                if not isinstance(msg["content"], str) and isinstance(msg["content"], list):
+                    # find the image and filter it out
+                    _new_content = []
+                    for c in msg["content"]:
+                        if c["type"] == "image_url":
+                            _new_content.append(
+                                {
+                                    "type": "image_url",
+                                    "image_url": c["image_url"][:100]
+                                }
+                            )
+                        else:
+                            _new_content.append(c)
+
+                    new_msg = {
+                        "content": _new_content,
+                        "role": msg["role"],
+                    }
+
+                # now append the message
+                msgs_to_log.append(new_msg)
+
+            # now populate the params we will log with the new messages
+            params["messages"] = msgs_to_log
+            logger.error(f"Input to API was: {json.dumps(params, indent=2)}")
             raise
         except Exception as e:
             logger.error(f"Unexpected error in ask_tool: {e}")

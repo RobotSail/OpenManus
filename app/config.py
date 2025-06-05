@@ -1,9 +1,9 @@
 import json
 import threading
-import tomllib
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import tomllib
 from pydantic import BaseModel, Field
 
 
@@ -225,6 +225,21 @@ class Config:
             "api_type": base_llm.get("api_type", ""),
             "api_version": base_llm.get("api_version", ""),
         }
+
+        # Add vision model configuration if present
+        vision_config = base_llm.get("vision", {})
+        if vision_config:
+            vision_settings = {
+                "model": vision_config.get("model", default_settings["model"]),
+                "base_url": vision_config.get("base_url", default_settings["base_url"]),
+                "api_key": vision_config.get("api_key", default_settings["api_key"]),
+                "max_tokens": vision_config.get("max_tokens", default_settings["max_tokens"]),
+                "max_input_tokens": vision_config.get("max_input_tokens", default_settings["max_input_tokens"]),
+                "temperature": vision_config.get("temperature", default_settings["temperature"]),
+                "api_type": vision_config.get("api_type", default_settings["api_type"]),
+                "api_version": vision_config.get("api_version", default_settings["api_version"]),
+            }
+            llm_overrides["vision"] = vision_settings
 
         # handle browser config.
         browser_config = raw_config.get("browser", {})

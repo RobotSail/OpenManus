@@ -7,14 +7,13 @@ from browser_use import Browser as BrowserUseBrowser
 from browser_use import BrowserConfig
 from browser_use.browser.context import BrowserContext, BrowserContextConfig
 from browser_use.dom.service import DomService
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_core.core_schema import ValidationInfo
 
 from app.config import config
 from app.llm import LLM
 from app.tool.base import BaseTool, ToolResult
 from app.tool.web_search import WebSearch
-
 
 _BROWSER_DESCRIPTION = """\
 A powerful browser automation tool that allows interaction with web pages through various actions.
@@ -130,7 +129,15 @@ class BrowserUseTool(BaseTool, Generic[Context]):
     # Context for generic functionality
     tool_context: Optional[Context] = Field(default=None, exclude=True)
 
-    llm: Optional[LLM] = Field(default_factory=LLM)
+    # Initialize LLM with vision configuration
+    llm: Optional[LLM] = Field(default_factory=lambda: LLM("vision"), exclude=True)
+
+    @model_validator(mode="after")
+    def initialize_llm(self) -> "BrowserUseTool":
+        """Initialize LLM with vision configuration if not already set."""
+        if not self.llm:
+            self.llm = LLM("vision")
+        return self
 
     @field_validator("parameters", mode="before")
     def validate_parameters(cls, v: dict, info: ValidationInfo) -> dict:
@@ -276,11 +283,39 @@ class BrowserUseTool(BaseTool, Generic[Context]):
                     element = await context.get_dom_element_by_index(index)
                     if not element:
                         return ToolResult(error=f"Element with index {index} not found")
-                    download_path = await context._click_element_node(element)
-                    output = f"Clicked element at index {index}"
-                    if download_path:
-                        output += f" - Downloaded file to {download_path}"
-                    return ToolResult(output=output)
+
+                    # Try to locate the element first
+                    element_handle = await context.get_locate_element(element)
+                    if not element_handle:
+                        # Fallback: try direct interaction using JavaScript and XPath
+                        page = await context.get_current_page()
+                        try:
+                            # Use XPath to find and click the element
+                            xpath = element.xpath
+                            await page.evaluate(f"""
+                                () => {{
+                                    const element = document.evaluate('{xpath}', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+                                    if (element) {{
+                                        element.scrollIntoView({{behavior: 'smooth', block: 'center'}});
+                                        setTimeout(() => element.click(), 100);
+                                        return true;
+                                    }}
+                                    return false;
+                                }}
+                            """)
+                            return ToolResult(output=f"Clicked element at index {index} using JavaScript fallback")
+                        except Exception as e:
+                            return ToolResult(error=f"Failed to click element at index {index}. Element location failed and JavaScript fallback failed: {str(e)}")
+
+                    # Standard click if element was found
+                    try:
+                        download_path = await context._click_element_node(element)
+                        output = f"Clicked element at index {index}"
+                        if download_path:
+                            output += f" - Downloaded file to {download_path}"
+                        return ToolResult(output=output)
+                    except Exception as e:
+                        return ToolResult(error=f"Failed to click element at index {index}: {str(e)}")
 
                 elif action == "input_text":
                     if index is None or not text:
@@ -290,10 +325,57 @@ class BrowserUseTool(BaseTool, Generic[Context]):
                     element = await context.get_dom_element_by_index(index)
                     if not element:
                         return ToolResult(error=f"Element with index {index} not found")
-                    await context._input_text_element_node(element, text)
-                    return ToolResult(
-                        output=f"Input '{text}' into element at index {index}"
-                    )
+
+                    # Try to locate the element first
+                    element_handle = await context.get_locate_element(element)
+                    if not element_handle:
+                        # Fallback: try direct interaction using JavaScript and XPath
+                        page = await context.get_current_page()
+                        try:
+                            # Use XPath to find and fill the element
+                            xpath = element.xpath
+                            escaped_text = text.replace("'", "\\'")
+                            await page.evaluate(f"""
+                                () => {{
+                                    const element = document.evaluate('{xpath}', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+                                    if (element) {{
+                                        element.scrollIntoView({{behavior: 'smooth', block: 'center'}});
+                                        element.focus();
+
+                                        // Clear existing content
+                                        if (element.value !== undefined) {{
+                                            element.value = '';
+                                        }} else if (element.textContent !== undefined) {{
+                                            element.textContent = '';
+                                        }}
+
+                                        // Input new text
+                                        if (element.value !== undefined) {{
+                                            element.value = '{escaped_text}';
+                                            element.dispatchEvent(new Event('input', {{bubbles: true}}));
+                                            element.dispatchEvent(new Event('change', {{bubbles: true}}));
+                                        }} else {{
+                                            element.textContent = '{escaped_text}';
+                                            element.dispatchEvent(new Event('input', {{bubbles: true}}));
+                                        }}
+
+                                        return true;
+                                    }}
+                                    return false;
+                                }}
+                            """)
+                            return ToolResult(output=f"Input '{text}' into element at index {index} using JavaScript fallback")
+                        except Exception as e:
+                            return ToolResult(error=f"Failed to input text into element at index {index}. Element location failed and JavaScript fallback failed: {str(e)}")
+
+                    # Standard input if element was found
+                    try:
+                        await context._input_text_element_node(element, text)
+                        return ToolResult(
+                            output=f"Input '{text}' into element at index {index}"
+                        )
+                    except Exception as e:
+                        return ToolResult(error=f"Failed to input text into element at index {index}: {str(e)}")
 
                 elif action == "scroll_down" or action == "scroll_up":
                     direction = 1 if action == "scroll_down" else -1
@@ -383,65 +465,65 @@ class BrowserUseTool(BaseTool, Generic[Context]):
 
                     content = markdownify.markdownify(await page.content())
 
-                    prompt = f"""\
-Your task is to extract the content of the page. You will be given a page and a goal, and you should extract all relevant information around this goal from the page. If the goal is vague, summarize the page. Respond in json format.
+                    # Take a screenshot for visual analysis - only capture visible viewport
+                    screenshot = await page.screenshot(
+                        full_page=False, animations="disabled", type="jpeg", quality=100
+                    )
+                    base64_screenshot = base64.b64encode(screenshot).decode("utf-8")
+
+                    # Split the prompt into system and user messages
+                    system_prompt = "You are an AI assistant that extracts and analyzes webpage content both visually and textually. You should extract information based on specific goals and format your response in JSON."
+
+                    user_prompt = f"""\
+Please extract content from this webpage based on the following goal. If the goal is vague, summarize the page.
 Extraction goal: {goal}
 
 Page content:
 {content[:max_content_length]}
 """
-                    messages = [{"role": "system", "content": prompt}]
+                    messages = [
+                        {"role": "system", "content": system_prompt},
+                        {
+                            "role": "user",
+                            "content": user_prompt,
+                        }
+                    ]
 
-                    # Define extraction function schema
-                    extraction_function = {
-                        "type": "function",
-                        "function": {
-                            "name": "extract_content",
-                            "description": "Extract specific information from a webpage based on a goal",
-                            "parameters": {
-                                "type": "object",
-                                "properties": {
-                                    "extracted_content": {
-                                        "type": "object",
-                                        "description": "The content extracted from the page according to the goal",
-                                        "properties": {
-                                            "text": {
-                                                "type": "string",
-                                                "description": "Text content extracted from the page",
-                                            },
-                                            "metadata": {
-                                                "type": "object",
-                                                "description": "Additional metadata about the extracted content",
-                                                "properties": {
-                                                    "source": {
-                                                        "type": "string",
-                                                        "description": "Source of the extracted content",
-                                                    }
-                                                },
-                                            },
-                                        },
+                    # Use ask_with_images to leverage vision capabilities
+                    try:
+                        response = await self.llm.ask_with_images(
+                            messages=messages,
+                            images=[{
+                                "url": f"data:image/jpeg;base64,{base64_screenshot}"
+                            }],
+                            temperature=0.0
+                        )
+
+                        # Parse the response as JSON
+                        try:
+                            extracted_content = json.loads(response)
+                        except json.JSONDecodeError:
+                            # If response is not JSON, wrap it in a basic structure
+                            extracted_content = {
+                                "extracted_content": {
+                                    "text": response,
+                                    "visual_elements": {
+                                        "layout": "Could not parse visual elements",
+                                        "interactive_elements": []
+                                    },
+                                    "metadata": {
+                                        "source": "webpage"
                                     }
-                                },
-                                "required": ["extracted_content"],
-                            },
-                        },
-                    }
+                                }
+                            }
 
-                    # Use LLM to extract content with required function calling
-                    response = await self.llm.ask_tool(
-                        messages,
-                        tools=[extraction_function],
-                        tool_choice="required",
-                    )
-
-                    if response and response.tool_calls:
-                        args = json.loads(response.tool_calls[0].function.arguments)
-                        extracted_content = args.get("extracted_content", {})
                         return ToolResult(
                             output=f"Extracted from page:\n{extracted_content}\n"
                         )
-
-                    return ToolResult(output="No content was extracted from the page.")
+                    except Exception as e:
+                        return ToolResult(
+                            error=f"Failed to extract content: {str(e)}"
+                        )
 
                 # Tab management actions
                 elif action == "switch_tab":
@@ -484,28 +566,28 @@ Page content:
         If context is not provided, uses self.context.
         """
         try:
-            # Use provided context or fall back to self.context
-            ctx = context or self.context
-            if not ctx:
-                return ToolResult(error="Browser context not initialized")
+            # First ensure browser is initialized
+            if not context:
+                context = await self._ensure_browser_initialized()
 
-            state = await ctx.get_state()
+            state = await context.get_state()
 
             # Create a viewport_info dictionary if it doesn't exist
             viewport_height = 0
             if hasattr(state, "viewport_info") and state.viewport_info:
                 viewport_height = state.viewport_info.height
-            elif hasattr(ctx, "config") and hasattr(ctx.config, "browser_window_size"):
-                viewport_height = ctx.config.browser_window_size.get("height", 0)
+            elif hasattr(context, "config") and hasattr(context.config, "browser_window_size"):
+                viewport_height = context.config.browser_window_size.get("height", 0)
 
             # Take a screenshot for the state
-            page = await ctx.get_current_page()
+            page = await context.get_current_page()
 
             await page.bring_to_front()
             await page.wait_for_load_state()
 
+            # Only capture the visible viewport
             screenshot = await page.screenshot(
-                full_page=True, animations="disabled", type="jpeg", quality=100
+                full_page=False, animations="disabled", type="jpeg", quality=100
             )
 
             screenshot = base64.b64encode(screenshot).decode("utf-8")
