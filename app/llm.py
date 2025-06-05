@@ -45,6 +45,7 @@ MULTIMODAL_MODELS = [
     "claude-3-7-sonnet-20250219",
     "claude-3-5-sonnet-20241022",
     "OpenGVLab/InternVL3-78B",
+    # "Qwen/Qwen3-235B-A22B",
 ]
 
 
@@ -237,6 +238,9 @@ class LLM:
             self.model = llm_config.model
             self.max_tokens = llm_config.max_tokens
             self.temperature = llm_config.temperature
+            self.top_p = llm_config.top_p
+            self.top_k = llm_config.top_k
+            self.min_p = llm_config.min_p
             self.api_type = llm_config.api_type
             self.api_key = llm_config.api_key
             self.api_version = llm_config.api_version
@@ -417,6 +421,9 @@ class LLM:
         system_msgs: Optional[List[Union[dict, Message]]] = None,
         stream: bool = True,
         temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        top_k: Optional[int] = None,
+        min_p: Optional[float] = None,
     ) -> str:
         """
         Send a prompt to the LLM and get the response.
@@ -426,6 +433,9 @@ class LLM:
             system_msgs: Optional system messages to prepend
             stream (bool): Whether to stream the response
             temperature (float): Sampling temperature for the response
+            top_p (float): Nucleus sampling parameter
+            top_k (int): Top-k sampling parameter
+            min_p (float): Min-p sampling parameter
 
         Returns:
             str: The generated response
@@ -471,6 +481,19 @@ class LLM:
                 params["temperature"] = (
                     temperature if temperature is not None else self.temperature
                 )
+                params["top_p"] = (
+                    top_p if top_p is not None else self.top_p
+                )
+                params["min_p"] = (
+                    min_p if min_p is not None else self.min_p
+                )
+                if 'extra_body' not in params:
+                    params['extra_body'] = {}
+
+                params['extra_body']["top_k"] = (
+                    top_k if top_k is not None else self.top_k
+                )
+
 
             if not stream:
                 # Non-streaming request
@@ -547,6 +570,9 @@ class LLM:
         system_msgs: Optional[List[Union[dict, Message]]] = None,
         stream: bool = False,
         temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        top_k: Optional[int] = None,
+        min_p: Optional[float] = None,
     ) -> str:
         """
         Send a prompt with images to the LLM and get the response.
@@ -557,6 +583,9 @@ class LLM:
             system_msgs: Optional system messages to prepend
             stream (bool): Whether to stream the response
             temperature (float): Sampling temperature for the response
+            top_p (float): Nucleus sampling parameter
+            top_k (int): Top-k sampling parameter
+            min_p (float): Min-p sampling parameter
 
         Returns:
             str: The generated response
@@ -645,6 +674,19 @@ class LLM:
                 params["temperature"] = (
                     temperature if temperature is not None else self.temperature
                 )
+                params["top_p"] = (
+                    top_p if top_p is not None else self.top_p
+                )
+                params["min_p"] = (
+                    min_p if min_p is not None else self.min_p
+                )
+                if 'extra_body' not in params:
+                    params['extra_body'] = {}
+
+                params['extra_body']["top_k"] = (
+                    top_k if top_k is not None else self.top_k
+                )
+
 
             # Handle non-streaming request
             if not stream:
@@ -706,6 +748,9 @@ class LLM:
         tools: Optional[List[dict]] = None,
         tool_choice: TOOL_CHOICE_TYPE = ToolChoice.AUTO,  # type: ignore
         temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        top_k: Optional[int] = None,
+        min_p: Optional[float] = None,
         **kwargs,
     ) -> ChatCompletionMessage | None:
         """
@@ -718,6 +763,9 @@ class LLM:
             tools: List of tools to use
             tool_choice: Tool choice strategy
             temperature: Sampling temperature for the response
+            top_p: Nucleus sampling parameter
+            top_k: Top-k sampling parameter
+            min_p: Min-p sampling parameter
             **kwargs: Additional completion arguments
 
         Returns:
@@ -780,6 +828,9 @@ class LLM:
                 **kwargs,
             }
 
+            if 'extra_body' not in params:
+                params['extra_body'] = {}
+
             if self.model in REASONING_MODELS:
                 params["max_completion_tokens"] = self.max_tokens
             else:
@@ -787,6 +838,16 @@ class LLM:
                 params["temperature"] = (
                     temperature if temperature is not None else self.temperature
                 )
+                params["top_p"] = (
+                    top_p if top_p is not None else self.top_p
+                )
+                params["min_p"] = (
+                    min_p if min_p is not None else self.min_p
+                )
+                params['extra_body']["top_k"] = (
+                    top_k if top_k is not None else self.top_k
+                )
+
 
             params["stream"] = False  # Always use non-streaming for tool requests
             response: ChatCompletion = await self.client.chat.completions.create(

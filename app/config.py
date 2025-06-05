@@ -26,6 +26,9 @@ class LLMSettings(BaseModel):
         description="Maximum input tokens to use across all requests (None for unlimited)",
     )
     temperature: float = Field(1.0, description="Sampling temperature")
+    top_p: float = Field(1.0, description="Nucleus sampling parameter (0.0 to 1.0)")
+    top_k: int = Field(-1, description="Top-k sampling parameter (-1 for disabled)")
+    min_p: float = Field(0, description="Min-p sampling parameter (0 for default)")
     api_type: str = Field(..., description="Azure, Openai, or Ollama")
     api_version: str = Field(..., description="Azure Openai version if AzureOpenai")
 
@@ -222,6 +225,9 @@ class Config:
             "max_tokens": base_llm.get("max_tokens", 4096),
             "max_input_tokens": base_llm.get("max_input_tokens"),
             "temperature": base_llm.get("temperature", 1.0),
+            "top_p": base_llm.get("top_p", 1.0),
+            "top_k": base_llm.get("top_k", -1),
+            "min_p": base_llm.get("min_p", 0.0),
             "api_type": base_llm.get("api_type", ""),
             "api_version": base_llm.get("api_version", ""),
         }
@@ -236,6 +242,9 @@ class Config:
                 "max_tokens": vision_config.get("max_tokens", default_settings["max_tokens"]),
                 "max_input_tokens": vision_config.get("max_input_tokens", default_settings["max_input_tokens"]),
                 "temperature": vision_config.get("temperature", default_settings["temperature"]),
+                "top_p": vision_config.get("top_p", default_settings["top_p"]),
+                "top_k": vision_config.get("top_k", default_settings["top_k"]),
+                "min_p": vision_config.get("min_p", default_settings["min_p"]),
                 "api_type": vision_config.get("api_type", default_settings["api_type"]),
                 "api_version": vision_config.get("api_version", default_settings["api_version"]),
             }
