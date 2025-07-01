@@ -29,6 +29,8 @@ class LLMSettings(BaseModel):
     top_p: float = Field(1.0, description="Nucleus sampling parameter (0.0 to 1.0)")
     top_k: int = Field(-1, description="Top-k sampling parameter (-1 for disabled)")
     min_p: float = Field(0, description="Min-p sampling parameter (0 for default)")
+    is_reasoning: bool = Field(default=False, description="Whether or not this model is reasoning (for models supporting both).")
+    is_multimodal: bool = Field(default=False, description="Whether this model can consume both images AND text")
     api_type: str = Field(..., description="Azure, Openai, or Ollama")
     api_version: str = Field(..., description="Azure Openai version if AzureOpenai")
 

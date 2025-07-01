@@ -1,7 +1,9 @@
 import asyncio
+import json
 import math
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Dict, List, Optional, Union
 
 import tiktoken
@@ -45,6 +47,7 @@ MULTIMODAL_MODELS = [
     "claude-3-7-sonnet-20250219",
     "claude-3-5-sonnet-20241022",
     "OpenGVLab/InternVL3-78B",
+    "Qwen/Qwen2.5-VL-72B-Instruct"
     # "Qwen/Qwen3-235B-A22B",
 ]
 
@@ -217,6 +220,7 @@ class TokenBucketRateLimiter:
             self.lock = False
 
 
+
 class LLM:
     _instances: Dict[str, "LLM"] = {}
 
@@ -245,6 +249,8 @@ class LLM:
             self.api_key = llm_config.api_key
             self.api_version = llm_config.api_version
             self.base_url = llm_config.base_url
+            self.is_reasoning = llm_config.is_reasoning
+            self.is_multimodal = llm_config.is_multimodal
 
             # Add token counting related attributes
             self.total_input_tokens = 0
@@ -448,7 +454,7 @@ class LLM:
         """
         try:
             # Check if the model supports images
-            supports_images = self.model in MULTIMODAL_MODELS
+            supports_images = self.model in MULTIMODAL_MODELS or self.is_multimodal
 
             # Format system and user messages with image support check
             if system_msgs:
@@ -474,25 +480,52 @@ class LLM:
                 "messages": messages,
             }
 
-            if self.model in REASONING_MODELS:
+            if self.is_reasoning:
                 params["max_completion_tokens"] = self.max_tokens
             else:
                 params["max_tokens"] = self.max_tokens
-                params["temperature"] = (
-                    temperature if temperature is not None else self.temperature
-                )
-                params["top_p"] = (
-                    top_p if top_p is not None else self.top_p
-                )
-                params["min_p"] = (
-                    min_p if min_p is not None else self.min_p
-                )
-                if 'extra_body' not in params:
-                    params['extra_body'] = {}
 
-                params['extra_body']["top_k"] = (
-                    top_k if top_k is not None else self.top_k
-                )
+            params["temperature"] = (
+                temperature if temperature is not None else self.temperature
+            )
+            params["top_p"] = (
+                top_p if top_p is not None else self.top_p
+            )
+            if 'extra_body' not in params:
+                params['extra_body'] = {}
+
+            params['extra_body']["top_k"] = (
+                top_k if top_k is not None else self.top_k
+            )
+            params["extra_body"]["min_p"] = (
+                min_p if min_p is not None else self.min_p
+            )
+
+            # Create logs directory if it doesn't exist
+            logs_dir = Path("logs")
+            logs_dir.mkdir(exist_ok=True)
+
+            # Create timestamp and filename
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            log_file = logs_dir / f"{timestamp}_params.json"
+
+            # Create a copy of params to log
+            params_to_log = params.copy()
+
+            # Handle any non-serializable content in messages
+            for msg in params_to_log["messages"]:
+                if not isinstance(msg["content"], str) and isinstance(msg["content"], list):
+                    # Handle multimodal content by simplifying image data
+                    new_content = []
+                    for item in msg["content"]:
+                        if item.get("type") == "image_url" and "image_url" in item:
+                            new_content.append({
+                                "type": "image_url",
+                                "image_url": item["image_url"]
+                            })
+                        else:
+                            new_content.append(item)
+                    msg["content"] = new_content
 
 
             if not stream:
@@ -599,7 +632,7 @@ class LLM:
         try:
             # For ask_with_images, we always set supports_images to True because
             # this method should only be called with models that support images
-            if self.model not in MULTIMODAL_MODELS:
+            if not self.is_multimodal or self.model not in MULTIMODAL_MODELS:
                 raise ValueError(
                     f"Model {self.model} does not support images. Use a model from {MULTIMODAL_MODELS}"
                 )
@@ -667,26 +700,61 @@ class LLM:
             }
 
             # Add model-specific parameters
-            if self.model in REASONING_MODELS:
+            if self.is_reasoning:
                 params["max_completion_tokens"] = self.max_tokens
             else:
                 params["max_tokens"] = self.max_tokens
-                params["temperature"] = (
-                    temperature if temperature is not None else self.temperature
-                )
-                params["top_p"] = (
-                    top_p if top_p is not None else self.top_p
-                )
-                params["min_p"] = (
-                    min_p if min_p is not None else self.min_p
-                )
-                if 'extra_body' not in params:
-                    params['extra_body'] = {}
 
-                params['extra_body']["top_k"] = (
-                    top_k if top_k is not None else self.top_k
-                )
+            params["temperature"] = (
+                temperature if temperature is not None else self.temperature
+            )
+            params["top_p"] = (
+                top_p if top_p is not None else self.top_p
+            )
+            if 'extra_body' not in params:
+                params['extra_body'] = {}
 
+            params['extra_body']["top_k"] = (
+                top_k if top_k is not None else self.top_k
+            )
+            params["extra_body"]["min_p"] = (
+                min_p if min_p is not None else self.min_p
+            )
+
+            # Create logs directory if it doesn't exist
+            logs_dir = Path("logs")
+            logs_dir.mkdir(exist_ok=True)
+
+            # Create timestamp and filename
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            log_file = logs_dir / f"{timestamp}_params.json"
+
+            # Create a copy of params to log
+            params_to_log = params.copy()
+
+            # Handle any non-serializable content in messages
+            for msg in params_to_log["messages"]:
+                if not isinstance(msg["content"], str) and isinstance(msg["content"], list):
+                    # Handle multimodal content by simplifying image data
+                    new_content = []
+                    for item in msg["content"]:
+                        if item.get("type") == "image_url" and "image_url" in item:
+                            new_content.append({
+                                "type": "image_url",
+                                "image_url": item["image_url"]
+                            })
+                        else:
+                            new_content.append(item)
+                    msg["content"] = new_content
+
+            # Write to file
+            with open(log_file, "w", encoding="utf-8") as f:
+                try:
+                    json.dump(params_to_log, f, indent=2, ensure_ascii=False)
+                except Exception as e:
+                    print(f"failed to dump to json: {e=}")
+                    import sys
+                    sys.exit(1)
 
             # Handle non-streaming request
             if not stream:
@@ -783,7 +851,7 @@ class LLM:
                 raise ValueError(f"Invalid tool_choice: {tool_choice}")
 
             # Check if the model supports images
-            supports_images = self.model in MULTIMODAL_MODELS
+            supports_images = self.model in MULTIMODAL_MODELS or self.is_multimodal
 
             # Format messages
             if system_msgs:
@@ -831,22 +899,58 @@ class LLM:
             if 'extra_body' not in params:
                 params['extra_body'] = {}
 
-            if self.model in REASONING_MODELS:
+            if self.is_reasoning:
                 params["max_completion_tokens"] = self.max_tokens
             else:
                 params["max_tokens"] = self.max_tokens
-                params["temperature"] = (
-                    temperature if temperature is not None else self.temperature
-                )
-                params["top_p"] = (
-                    top_p if top_p is not None else self.top_p
-                )
-                params["min_p"] = (
-                    min_p if min_p is not None else self.min_p
-                )
-                params['extra_body']["top_k"] = (
-                    top_k if top_k is not None else self.top_k
-                )
+
+            params["temperature"] = (
+                temperature if temperature is not None else self.temperature
+            )
+            params["top_p"] = (
+                top_p if top_p is not None else self.top_p
+            )
+            params['extra_body']["top_k"] = (
+                top_k if top_k is not None else self.top_k
+            )
+            params["extra_body"]["min_p"] = (
+                min_p if min_p is not None else self.min_p
+            )
+
+            # Log params to file for replay
+
+            # Create logs directory if it doesn't exist
+            logs_dir = Path("logs")
+            logs_dir.mkdir(exist_ok=True)
+
+            # Create timestamp and filename
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            log_file = logs_dir / f"{timestamp}_params.json"
+
+            # Create a copy of params to log
+            params_to_log = params.copy()
+
+            # Handle any non-serializable content in messages
+            for msg in params_to_log["messages"]:
+                if not isinstance(msg["content"], str) and isinstance(msg["content"], list):
+                    # Handle multimodal content by simplifying image data
+                    new_content = []
+                    for item in msg["content"]:
+                        if item.get("type") == "image_url" and "image_url" in item:
+                            new_content.append({
+                                "type": "image_url",
+                                "image_url": item["image_url"],
+                            })
+                        else:
+                            new_content.append(item)
+                    msg["content"] = new_content
+
+            # Write to file
+            with open(log_file, "w", encoding="utf-8") as f:
+                try:
+                    json.dump(params_to_log, f, indent=2, ensure_ascii=False)
+                except Exception as e:
+                    print(f"failed to dump JSON {e=}")
 
 
             params["stream"] = False  # Always use non-streaming for tool requests
@@ -915,7 +1019,6 @@ class LLM:
             logger.error(f"Validation error in ask_tool: {ve}")
             raise
         except OpenAIError as oe:
-            import json
             turns = [m["role"] for m in params["messages"]]
             logger.error(f"OpenAI API error: {oe}")
             if isinstance(oe, AuthenticationError):
@@ -933,11 +1036,12 @@ class LLM:
                     # find the image and filter it out
                     _new_content = []
                     for c in msg["content"]:
-                        if c["type"] == "image_url":
+                        print(f"{c=}")
+                        if c.get("type") == "image_url" and "image_url" in c:
                             _new_content.append(
                                 {
                                     "type": "image_url",
-                                    "image_url": c["image_url"][:100]
+                                    "image_url": c["image_url"]
                                 }
                             )
                         else:

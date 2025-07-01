@@ -12,6 +12,7 @@ from pydantic_core.core_schema import ValidationInfo
 
 from app.config import config
 from app.llm import LLM
+from app.logger import logger
 from app.tool.base import BaseTool, ToolResult
 from app.tool.web_search import WebSearch
 
@@ -244,7 +245,29 @@ class BrowserUseTool(BaseTool, Generic[Context]):
                         )
                     page = await context.get_current_page()
                     await page.goto(url)
-                    await page.wait_for_load_state()
+                    await page.wait_for_load_state("domcontentloaded")
+
+                    # For SPAs like Reddit, wait for network to be idle
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=5000)
+                    except:
+                        # If networkidle fails, just wait a bit longer
+                        await asyncio.sleep(3)
+
+                    # Give extra time for dynamic content and scripts to load
+                    await asyncio.sleep(2)
+
+                    # Try a small scroll to trigger any lazy loading
+                    try:
+                        await page.evaluate("window.scrollTo(0, 100); window.scrollTo(0, 0);")
+                        await asyncio.sleep(0.5)
+                    except:
+                        pass
+
+                    # Refresh DOM service for the new page
+                    if self.dom_service:
+                        self.dom_service = DomService(page)
+
                     return ToolResult(output=f"Navigated to {url}")
 
                 elif action == "go_back":
@@ -496,7 +519,7 @@ Page content:
                             images=[{
                                 "url": f"data:image/jpeg;base64,{base64_screenshot}"
                             }],
-                            temperature=0.0
+                            # temperature=0.0
                         )
 
                         # Parse the response as JSON
@@ -570,7 +593,68 @@ Page content:
             if not context:
                 context = await self._ensure_browser_initialized()
 
+            # Get the current page and ensure it's fully loaded
+            page = await context.get_current_page()
+            await page.bring_to_front()
+            await page.wait_for_load_state("domcontentloaded")
+
+            # Add a small delay to ensure dynamic content loads
+            await asyncio.sleep(0.5)
+
+            # Force refresh the element tree if it's None or empty
             state = await context.get_state()
+
+            # Check if we have elements before trying to get them
+            has_elements = False
+            if state.element_tree:
+                try:
+                    test_elements = state.element_tree.clickable_elements_to_string()
+                    has_elements = len(test_elements.strip()) > 0
+                except:
+                    has_elements = False
+
+            # If element tree is None or has no clickable elements, try to force regeneration
+            if not state.element_tree or not has_elements:
+                try:
+                    logger.debug(f"DEBUG: Forcing element tree regeneration (tree exists: {state.element_tree is not None}, has elements: {has_elements})")
+
+                    # Special handling for Reddit and other SPAs with anti-bot detection
+                    if 'reddit.com' in state.url.lower():
+                        await self._setup_reddit_stealth_mode(page)
+
+                    # Wait longer for dynamic content (especially for SPAs like Reddit)
+                    await asyncio.sleep(2)
+
+                    # Try to trigger any lazy loading by scrolling
+                    try:
+                        await page.evaluate("window.scrollTo(0, 100); window.scrollTo(0, 0);")
+                        await asyncio.sleep(0.5)
+                    except:
+                        pass
+
+                    # Wait for network to be idle (important for React/Vue apps)
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=3000)
+                    except:
+                        pass
+
+                    # Force DOM service refresh
+                    if self.dom_service:
+                        self.dom_service = DomService(page)
+
+                    # Get state again
+                    state = await context.get_state()
+
+                    # If still no elements, try one more time with longer wait
+                    if state.element_tree:
+                        test_elements = state.element_tree.clickable_elements_to_string()
+                        if not test_elements.strip():
+                            logger.debug("DEBUG: Still no elements, trying final regeneration...")
+                            await asyncio.sleep(3)
+                            state = await context.get_state()
+
+                except Exception as dom_error:
+                    logger.warning(f"DOM service refresh failed: {dom_error}")
 
             # Create a viewport_info dictionary if it doesn't exist
             viewport_height = 0
@@ -579,12 +663,6 @@ Page content:
             elif hasattr(context, "config") and hasattr(context.config, "browser_window_size"):
                 viewport_height = context.config.browser_window_size.get("height", 0)
 
-            # Take a screenshot for the state
-            page = await context.get_current_page()
-
-            await page.bring_to_front()
-            await page.wait_for_load_state()
-
             # Only capture the visible viewport
             screenshot = await page.screenshot(
                 full_page=False, animations="disabled", type="jpeg", quality=100
@@ -592,17 +670,28 @@ Page content:
 
             screenshot = base64.b64encode(screenshot).decode("utf-8")
 
+            # Get interactive elements
+            interactive_elements = ""
+            if state.element_tree:
+                try:
+                    interactive_elements = state.element_tree.clickable_elements_to_string()
+                except Exception as e:
+                    logger.warning(f"Failed to get clickable elements: {e}")
+                    interactive_elements = ""
+
+            # Debug output to help troubleshoot
+            logger.debug(f"DEBUG: Element tree exists: {state.element_tree is not None}")
+            logger.debug(f"DEBUG: Interactive elements length: {len(interactive_elements)}")
+            if interactive_elements:
+                logger.debug(f"DEBUG: Interactive elements preview: {interactive_elements[:200]}...")
+
             # Build the state info with all required fields
             state_info = {
                 "url": state.url,
                 "title": state.title,
                 "tabs": [tab.model_dump() for tab in state.tabs],
-                "help": "[0], [1], [2], etc., represent clickable indices corresponding to the elements listed. Clicking on these indices will navigate to or interact with the respective content behind them.",
-                "interactive_elements": (
-                    state.element_tree.clickable_elements_to_string()
-                    if state.element_tree
-                    else ""
-                ),
+                "help": "[1], [2], [3], etc., represent clickable indices corresponding to the elements listed. Clicking on these indices will navigate to or interact with the respective content behind them.",
+                "interactive_elements": interactive_elements,
                 "scroll_info": {
                     "pixels_above": getattr(state, "pixels_above", 0),
                     "pixels_below": getattr(state, "pixels_below", 0),

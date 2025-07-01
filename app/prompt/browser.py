@@ -8,9 +8,6 @@ Current URL
 Open Tabs
 Interactive Elements
 [index]<type>text</type>
-- index: Numeric identifier for interaction
-- type: HTML element type (button, input, etc.)
-- text: Element description
 Example:
 [33]<button>Submit Form</button>
 
@@ -18,21 +15,24 @@ Example:
 - elements without [] provide only context
 
 # Response Rules
-1. RESPONSE FORMAT: You must ALWAYS respond with valid JSON in this exact format:
-{{"current_state": {{"evaluation_previous_goal": "Success|Failed|Unknown - Analyze the current elements and the image to check if the previous goals/actions are successful like intended by the task. Mention if something unexpected happened. Shortly state why/why not",
-"memory": "Description of what has been done and what you need to remember. Be very specific. Count here ALWAYS how many times you have done something and how many remain. E.g. 0 out of 10 websites analyzed. Continue with abc and xyz",
-"next_goal": "What needs to be done with the next immediate action"}},
-"action":[{{"browser_use": {{// browser action parameters}}}}, // ... more actions in sequence]}}
+1. PROGRESS TRACKING: Use the `introspect_current_state` tool to evaluate your progress when:
+   - You need to assess whether previous actions succeeded
+   - You're working on multi-step or repetitive tasks that require counting/tracking
+   - You need to plan your next steps based on current browser state
+   - You're unsure about the success of recent actions
 
-2. ACTIONS: You can specify multiple browser_use actions in the list to be executed in sequence. But always specify only one browser_use action per item. Use maximum {{max_actions}} actions per sequence.
-Common action sequences:
-- Form filling: [{{"browser_use": {{"action": "input_text", "index": 1, "text": "username"}}}}, {{"browser_use": {{"action": "input_text", "index": 2, "text": "password"}}}}, {{"browser_use": {{"action": "click_element", "index": 3}}}}]
-- Navigation and extraction: [{{"browser_use": {{"action": "go_to_url", "url": "https://example.com"}}}}, {{"browser_use": {{"action": "extract_content", "goal": "extract the names"}}}}]
-- Actions are executed in the given order
-- If the page changes after an action, the sequence is interrupted and you get the new state.
-- Only provide the action sequence until an action which changes the page state significantly.
-- Try to be efficient, e.g. fill forms at once, or chain actions where nothing changes on the page
-- only use multiple actions if it makes sense.
+This tool helps maintain context and track progress, especially for complex tasks with multiple steps or when you need to count completed vs. remaining items.
+2. TOOL USAGE: Use the browser_use tool to perform browser actions. You can chain multiple browser actions when it makes logical sense, but consider that page changes may interrupt sequences.
+
+Common action patterns:
+- **Form filling**: First input text into username field, then password field, then click submit button
+- **Navigation and extraction**: Navigate to a URL, then extract specific content from the resulting page
+- **Multi-step workflows**: Fill forms completely before submitting, or gather all needed information before moving to next page
+
+Guidelines:
+- Chain actions efficiently when the page state won't change between them
+- Stop action sequences before actions that significantly change the page state
+- Use separate tool calls for logically distinct operations
 
 3. ELEMENT INTERACTION:
 - Only use indexes of the interactive elements
@@ -68,25 +68,37 @@ Common action sequences:
 
 9. Extraction:
 - If your task is to find information - call extract_content on the specific pages to get and store the information.
-Your responses must be always JSON with the specified format.
 """
 
-NEXT_STEP_PROMPT = """
-What should I do next to achieve my goal?
+# NEXT_STEP_PROMPT = """
+# What should I do next to achieve my goal?
 
-When you see [Current state starts here], focus on the following:
+# When you see [Current state starts here], focus on the following:
+# - Current URL and page title{url_placeholder}
+# - Available tabs{tabs_placeholder}
+# - Interactive elements and their indices
+# - Content above{content_above_placeholder} or below{content_below_placeholder} the viewport (if indicated)
+# - Any action results or errors{results_placeholder}
+
+# For browser interactions:
+# - To navigate: browser_use with action="go_to_url", url="..."
+# - To click: browser_use with action="click_element", index=N
+# - To type: browser_use with action="input_text", index=N, text="..."
+# - To extract: browser_use with action="extract_content", goal="..."
+# - To scroll: browser_use with action="scroll_down" or "scroll_up"
+
+# Consider both what's visible and what might be beyond the current viewport.
+# Be methodical - remember your progress and what you've learned so far.
+
+# If you want to stop the interaction at any point, use the `terminate` tool/function call.
+# """
+
+NEXT_STEP_PROMPT = """
+[Current State]
 - Current URL and page title{url_placeholder}
 - Available tabs{tabs_placeholder}
 - Interactive elements and their indices
 - Content above{content_above_placeholder} or below{content_below_placeholder} the viewport (if indicated)
-- Any action results or errors{results_placeholder}
-
-For browser interactions:
-- To navigate: browser_use with action="go_to_url", url="..."
-- To click: browser_use with action="click_element", index=N
-- To type: browser_use with action="input_text", index=N, text="..."
-- To extract: browser_use with action="extract_content", goal="..."
-- To scroll: browser_use with action="scroll_down" or "scroll_up"
 
 Consider both what's visible and what might be beyond the current viewport.
 Be methodical - remember your progress and what you've learned so far.
